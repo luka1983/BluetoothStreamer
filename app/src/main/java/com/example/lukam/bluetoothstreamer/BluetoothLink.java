@@ -1,9 +1,12 @@
 package com.example.lukam.bluetoothstreamer;
 
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothServerSocket;
+import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.util.Log;
 
+import java.io.IOException;
 import java.util.UUID;
 import android.os.Handler;
 
@@ -36,12 +39,12 @@ public class BluetoothLink {
     private final BluetoothAdapter mAdapter;
     private final Handler mHandler;
     private AcceptThread mAcceptThread;
-    private ConnectThread mConnectThread;
-    private CommunicationThread mCommunicationThread;
+//    private ConnectThread mConnectThread;
+ //   private CommunicationThread mCommunicationThread;
     private State mState;
 
     // Link states
-    private static final enum State { NONE, LISTENING, CONNECTING, CONNECTED };
+    private static enum State { NONE, LISTENING, CONNECTING, CONNECTED };
 
     /**
      * Constructor. Prepares new BluetoothLink
@@ -64,5 +67,89 @@ public class BluetoothLink {
 
         // Inform the UI Activity about state change
         mHandler.obtainMessage();
+    }
+
+    /**
+     * Return the current connect state
+     */
+    public synchronized State getState() {
+        return mState;
+    }
+
+    /**
+     * Start the link service
+     */
+    public synchronized void start() {
+        if (DEBUG) Log.d(TAG, "Starting link...");
+
+        // Cancel any thread attempting to make a connection
+    }
+
+    private class AcceptThread extends Thread {
+        // The local server socket
+        private final BluetoothServerSocket mmServerSocket;
+
+        // Constructor
+        public AcceptThread() {
+            BluetoothServerSocket tmp = null;
+
+            // Create a new listening server socket
+            try {
+                tmp = mAdapter.listenUsingRfcommWithServiceRecord(BL_SDP_SERVICE_NAME, BL_UUID);
+            } catch (IOException e) {
+                Log.e(TAG, "listen() failed");
+            }
+            mmServerSocket = tmp;
+        }
+
+        // run() method
+        public void run() {
+            if (DEBUG) Log.d(TAG, "BEGIN mAcceptThread");
+            setName("AcceptThread");
+
+            BluetoothSocket socket = null;
+
+            // while not connected, listen to a server socket
+            while (mState != BluetoothLink.State.CONNECTED) {
+                try {
+                    // blocking call
+                    socket = mmServerSocket.accept();
+                } catch (IOException e) {
+                    Log.e(TAG, "accept() failed");
+                    break;
+                }
+
+                // connection accepted...
+                if (socket != null) {
+                    synchronized (BluetoothLink.this) {
+                        switch (mState) {
+                            case LISTENING:
+                            case CONNECTING:
+                                // switch state to connected
+                                break;
+                            case NONE:
+                            case CONNECTED:
+                                // we do not support multiple connections
+                                try {
+                                    socket.close();
+                                } catch (IOException e) {
+                                    Log.e(TAG, "Could not close unwanted socket");
+                                }
+                                break;
+                        }
+                    }
+                }
+            }
+            if (DEBUG) Log.d(TAG, "END mAcceptThread");
+        }
+
+        public void cancel() {
+            if (DEBUG) Log.d(TAG, "CANCEL mAcceptThread");
+            try {
+                mmServerSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Could not close server socket");
+            }
+        }
     }
 }
