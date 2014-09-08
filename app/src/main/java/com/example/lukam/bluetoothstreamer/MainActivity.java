@@ -2,18 +2,42 @@ package com.example.lukam.bluetoothstreamer;
 
 import android.app.Activity;
 import android.os.Bundle;
+import android.os.Message;
 import android.view.Menu;
 import android.view.MenuItem;
 
+import android.os.Handler;
+
 
 public class MainActivity extends Activity {
+
+    private BluetoothLink link = null;
+    private BluetoothLink.BLMessage message;
+
+    private final Handler mHandler = new Handler() {
+        @Override
+        public void handleMessage(Message msg) {
+            switch (BluetoothLink.BLMessage.values()[msg.what]) {
+                case STATE_CHANGED:
+                    switch (BluetoothLink.BLState.values()[msg.arg1]) {
+                        case LISTENING:
+                        case CONNECTING:
+                        case CONNECTED:
+                        case NONE:
+                    }
+                case READ:
+                case WRITE:
+
+
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
     }
-
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {

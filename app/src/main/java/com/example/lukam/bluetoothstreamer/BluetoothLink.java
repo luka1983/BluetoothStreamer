@@ -1,21 +1,24 @@
 package com.example.lukam.bluetoothstreamer;
 
 import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
-import android.content.Context;
+import android.os.Message;
 import android.util.Log;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.UUID;
 import android.os.Handler;
 
 /**
  * This class manages Bluetooth connection between two devices
  * Three threads of execution:
- *      1. Accept thread
- *      2. Connecting thread
- *      3. Communication thread
+ *      1. Accept thread        - socket server thread, runs until communication is established
+ *      2. Connecting thread    - client thread, asks for connection to a known device
+ *      3. Communication thread - generic communication thread, same for all endpoints
  *
  * Bluetooth link can posses one of the following states:
  *      1. NONE
@@ -39,21 +42,24 @@ public class BluetoothLink {
     private final BluetoothAdapter mAdapter;
     private final Handler mHandler;
     private AcceptThread mAcceptThread;
-//    private ConnectThread mConnectThread;
- //   private CommunicationThread mCommunicationThread;
-    private State mState;
+    private ConnectingThread mConnectingThread;
+    private CommunicationThread mCommunicationThread;
+    private BLState mState;
+    private boolean mIsSocektServer = true;
 
     // Link states
-    private static enum State { NONE, LISTENING, CONNECTING, CONNECTED };
+    public static enum BLState { NONE, LISTENING, CONNECTING, CONNECTED };
+
+    // Link messages
+    public static enum BLMessage { STATE_CHANGED, READ, WRITE };
 
     /**
      * Constructor. Prepares new BluetoothLink
-     * @param context   The UI Activity Context
      * @param handler   A Handler to send message back to UI Activity
      */
-    public BluetoothLink(Context context, Handler handler) {
+    public BluetoothLink(boolean isSocketServer, Handler handler) {
         mAdapter = BluetoothAdapter.getDefaultAdapter();
-        mState = State.NONE;
+        mState = BLState.NONE;
         mHandler = handler;
     }
 
@@ -61,30 +67,154 @@ public class BluetoothLink {
      * Set the current state
      * @param state     Link new state
      */
-    private synchronized void setState(State state) {
+    private synchronized void setState(BLState state) {
         if (DEBUG) Log.d(TAG, "setState() " + mState + " -> " + state);
         mState = state;
 
-        // Inform the UI Activity about state change
-        mHandler.obtainMessage();
+        // Inform service user about BluetoothLink state change
+        mHandler.obtainMessage(BLMessage.STATE_CHANGED.ordinal(), state.ordinal(), -1).sendToTarget();
     }
 
     /**
      * Return the current connect state
      */
-    public synchronized State getState() {
+    public synchronized BLState getState() {
         return mState;
     }
 
     /**
-     * Start the link service
+     * Start the socket server
      */
-    public synchronized void start() {
+    public synchronized void startAsServer() {
         if (DEBUG) Log.d(TAG, "Starting link...");
 
         // Cancel any thread attempting to make a connection
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
+        }
+
+        // Cancel communication thread if already running
+        if (mCommunicationThread != null) {
+            mCommunicationThread.cancel();
+            mCommunicationThread = null;
+        }
+
+        setState(BLState.LISTENING);
+
+        // Start the socket server thread
+        if (mAcceptThread == null) {
+            mAcceptThread = new AcceptThread();
+            mAcceptThread.start();
+        }
     }
 
+    /**
+     * Start the connection thread tp initiate connection to a remote device
+     * @param   device  The BluetoothDevice to connect
+     */
+    public synchronized void connect(BluetoothDevice device) {
+        if (DEBUG) Log.d(TAG, "connect to: " + device);
+
+        // Cancel any thread attempting to make a connection
+        if (mState == BLState.CONNECTING) {
+            if (mConnectingThread != null) {
+                mConnectingThread.cancel();
+                mConnectingThread = null;
+            }
+        }
+
+        // Cancel any thread currently running a connection
+        if (mCommunicationThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
+        }
+
+        mConnectingThread = new ConnectingThread(device);
+        mConnectingThread.start();
+        setState(BLState.CONNECTING);
+    }
+
+    /**
+     * Start the CommunicationThread
+     * @param   socket  BluetoothSocket on which connection was made
+     * @param   device  BluetoothDevice that has been connected
+     */
+    public synchronized void communicate(BluetoothSocket socket, BluetoothDevice device) {
+        if (DEBUG) Log.d(TAG, "Starting communication with connected device");
+
+        // Cancel the thread that completed the connection
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
+        }
+
+        // Cancel the accept thread, we support one-to-one communication only
+        if (mAcceptThread != null) {
+            mAcceptThread.cancel();
+            mAcceptThread = null;
+        }
+
+        // Start the communication thread
+        mCommunicationThread = new CommunicationThread(socket);
+        mCommunicationThread.start();
+
+        // TODO Inform device about connected device
+
+        setState(BLState.CONNECTED);
+    }
+
+    /**
+     * Stop all threads
+     */
+    public synchronized void stop() {
+        if (DEBUG) Log.d(TAG, "STOP");
+
+        if (mAcceptThread != null) {
+            mAcceptThread.cancel();
+            mAcceptThread = null;
+        }
+
+        if (mConnectingThread != null) {
+            mConnectingThread.cancel();
+            mConnectingThread = null;
+        }
+
+        if (mCommunicationThread != null) {
+            mCommunicationThread.cancel();
+            mCommunicationThread = null;
+        }
+
+        setState(BLState.NONE);
+    }
+
+    /**
+     * Write to the ConnectedThread in an unsynchronized manner
+     * @param   out Bytes to write
+     */
+    public void write(byte[] out) {
+        // Create temporary object
+        CommunicationThread r;
+        synchronized (this) {
+            if (mState != BLState.CONNECTED)
+                return;
+            r = mCommunicationThread;
+        }
+        // Perform the write unsynchronized
+        r.write(out);
+    }
+
+    /**
+     * Perform operations on connection fail
+     */
+    private void postMessage(BLMessage message, final String text ) {
+        Message msg = mHandler.obtainMessage(message.ordinal());
+        mHandler.sendMessage(msg);
+    }
+
+    /**
+     * Socket server thread - waiting for incoming connection
+     */
     private class AcceptThread extends Thread {
         // The local server socket
         private final BluetoothServerSocket mmServerSocket;
@@ -110,7 +240,7 @@ public class BluetoothLink {
             BluetoothSocket socket = null;
 
             // while not connected, listen to a server socket
-            while (mState != BluetoothLink.State.CONNECTED) {
+            while (mState != BLState.CONNECTED) {
                 try {
                     // blocking call
                     socket = mmServerSocket.accept();
@@ -121,11 +251,12 @@ public class BluetoothLink {
 
                 // connection accepted...
                 if (socket != null) {
-                    synchronized (BluetoothLink.this) {
+                    synchronized (this) {
                         switch (mState) {
                             case LISTENING:
                             case CONNECTING:
                                 // switch state to connected
+                                communicate(socket, socket.getRemoteDevice());
                                 break;
                             case NONE:
                             case CONNECTED:
@@ -149,6 +280,142 @@ public class BluetoothLink {
                 mmServerSocket.close();
             } catch (IOException e) {
                 Log.e(TAG, "Could not close server socket");
+            }
+        }
+    }
+
+    /**
+     * Connecting client thread - runs while connection is being established
+     */
+    private class ConnectingThread extends Thread {
+        private final BluetoothSocket mmSocket;
+        private final BluetoothDevice mmDevice;
+
+        public ConnectingThread(BluetoothDevice device) {
+            mmDevice = device;
+            BluetoothSocket tmp = null;
+
+            try {
+                tmp = device.createRfcommSocketToServiceRecord(BL_UUID);
+            } catch(IOException e) {
+                Log.e(TAG, "Could not create BluetoothSocket");
+            }
+            mmSocket = tmp;
+        }
+
+        public void run() {
+            if (DEBUG) Log.d(TAG, "BEGIN mConnectingThread");
+            setName("Connecting thread");
+
+            // Always cancel discovery because it will slow down a connection
+            mAdapter.cancelDiscovery();
+
+            // Make a connection to the BluetoothSocket
+            try {
+                // blocking call - returns only on a successful connection or an exception
+                mmSocket.connect();
+            } catch (IOException e) {
+                // Close the socket
+                try {
+                    mmSocket.close();
+                } catch (IOException e2) {
+                    Log.e(TAG, "Could not close() socket after connect() failure");
+                }
+
+                //
+                start();
+                return;
+            }
+
+            // Release ConnectionThread because we're done
+            synchronized (BluetoothLink.this) {
+                mConnectingThread = null;
+            }
+
+            if (DEBUG) Log.d(TAG, "END mConnectingThread");
+
+            // start the communication thread
+            communicate(mmSocket, mmDevice);
+        }
+
+        public void cancel() {
+            try {
+                mmSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "close() of client socket failed");
+            }
+        }
+    }
+
+    /**
+     * Communication thread - after successful connection is established this
+     * thread manages connection. The idea is to read the input stream as fast
+     * as possible in order not to limit the receiving data buffer.
+     */
+    private class CommunicationThread extends Thread {
+        private final BluetoothSocket mmSocket;
+        private final InputStream mmInStream;
+        private final OutputStream mmOutStream;
+
+        // Constructor
+        private CommunicationThread(BluetoothSocket socket) {
+            Log.d(TAG, "create CommunicationThread");
+            mmSocket = socket;
+            InputStream tmpIn = null;
+            OutputStream tmpOut = null;
+
+            // Get the BluetoothSocekt input and output streams
+            try {
+                tmpIn = socket.getInputStream();
+                tmpOut = socket.getOutputStream();
+            } catch (IOException e) {
+              Log.e(TAG, "Could not retrieve input and output streams from socket", e);
+            }
+
+            mmInStream = tmpIn;
+            mmOutStream = tmpOut;
+        }
+
+        public void run() {
+            if (DEBUG) Log.d(TAG, "BEGIN mCommunicationThread");
+            byte[] buffer = new byte[1024];
+            int bytes;
+
+            // Prioritize input stream reading
+            while (true) {
+                try {
+                    // Read from the InputStream
+                    bytes = mmInStream.read(buffer);
+
+                    // TODO Pass the obtained data to a service user via provided handler
+                } catch (IOException e) {
+                    Log.e(TAG, "connection lost", e);
+
+                    // Restart the service
+                    break;
+                }
+            }
+        }
+
+        /**
+        * Write to the connected OutputStream
+        * @param buffer    Bytes to write
+        */
+        public void write(byte[] buffer) {
+            try {
+                mmOutStream.write(buffer);
+
+                // TODO Inform the service user about successful write
+            } catch (IOException e) {
+                Log.e(TAG, "Exception during write", e);
+            }
+        }
+
+        public void cancel() {
+            try {
+                mmSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to close() connected socket", e);
             }
         }
     }
