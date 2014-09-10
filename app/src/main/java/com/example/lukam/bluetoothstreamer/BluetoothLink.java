@@ -36,7 +36,7 @@ public class BluetoothLink {
     private static final String BL_SDP_SERVICE_NAME = "BluetoothLink";
 
     // Unique UUID for this application
-    private static final UUID BL_UUID = UUID.fromString("c31e2950-34c2-49c0-b1f3-58d6066d7203");
+    private static final UUID BL_UUID = UUID.fromString("016b3cd0-38c7-11e4-916c-0800200c9a66");
 
     // Members
     private final BluetoothAdapter mAdapter;
@@ -45,7 +45,8 @@ public class BluetoothLink {
     private ConnectingThread mConnectingThread;
     private CommunicationThread mCommunicationThread;
     private BLState mState;
-    private boolean mIsSocektServer = true;
+    private boolean mIsSocketServer = false;
+    private BluetoothDevice mLastConnectedDevice = null;
 
     // Link states
     public static enum BLState { NONE, LISTENING, CONNECTING, CONNECTED };
@@ -57,7 +58,7 @@ public class BluetoothLink {
      * Constructor. Prepares new BluetoothLink
      * @param handler   A Handler to send message back to UI Activity
      */
-    public BluetoothLink(boolean isSocketServer, Handler handler) {
+    public BluetoothLink(Handler handler) {
         mAdapter = BluetoothAdapter.getDefaultAdapter();
         mState = BLState.NONE;
         mHandler = handler;
@@ -85,7 +86,7 @@ public class BluetoothLink {
     /**
      * Start the socket server
      */
-    public synchronized void startAsServer() {
+    public synchronized void accept() {
         if (DEBUG) Log.d(TAG, "Starting link...");
 
         // Cancel any thread attempting to make a connection
@@ -100,6 +101,8 @@ public class BluetoothLink {
             mCommunicationThread = null;
         }
 
+        mLastConnectedDevice = null;
+        mIsSocketServer = true;
         setState(BLState.LISTENING);
 
         // Start the socket server thread
@@ -114,6 +117,9 @@ public class BluetoothLink {
      * @param   device  The BluetoothDevice to connect
      */
     public synchronized void connect(BluetoothDevice device) {
+        if (device == null) {
+            // obtain device from the list of previously connected devices
+        }
         if (DEBUG) Log.d(TAG, "connect to: " + device);
 
         // Cancel any thread attempting to make a connection
@@ -126,10 +132,11 @@ public class BluetoothLink {
 
         // Cancel any thread currently running a connection
         if (mCommunicationThread != null) {
-            mConnectingThread.cancel();
-            mConnectingThread = null;
+            mCommunicationThread.cancel();
+            mCommunicationThread = null;
         }
 
+        mIsSocketServer = false;
         mConnectingThread = new ConnectingThread(device);
         mConnectingThread.start();
         setState(BLState.CONNECTING);
@@ -140,7 +147,7 @@ public class BluetoothLink {
      * @param   socket  BluetoothSocket on which connection was made
      * @param   device  BluetoothDevice that has been connected
      */
-    public synchronized void communicate(BluetoothSocket socket, BluetoothDevice device) {
+    private synchronized void communicate(BluetoothSocket socket, BluetoothDevice device) {
         if (DEBUG) Log.d(TAG, "Starting communication with connected device");
 
         // Cancel the thread that completed the connection
@@ -185,6 +192,7 @@ public class BluetoothLink {
             mCommunicationThread = null;
         }
 
+        //mIsSocketServer = !mIsSocketServer;
         setState(BLState.NONE);
     }
 
@@ -311,25 +319,30 @@ public class BluetoothLink {
             mAdapter.cancelDiscovery();
 
             // Make a connection to the BluetoothSocket
-            try {
-                // blocking call - returns only on a successful connection or an exception
-                mmSocket.connect();
-            } catch (IOException e) {
-                // Close the socket
+            //while(true) {
                 try {
-                    mmSocket.close();
-                } catch (IOException e2) {
-                    Log.e(TAG, "Could not close() socket after connect() failure");
-                }
+                    // blocking call - returns only on a successful connection or an exception
+                    mmSocket.connect();
+                    //break;
+                } catch (IOException e) {
+                    // Close the socket
+                    try {
+                        mmSocket.close();
+                    } catch (IOException e2) {
+                        Log.e(TAG, "Could not close() socket after connect() failure");
+                        return;
+                    }
 
-                //
-                start();
-                return;
-            }
+                    Log.e(TAG, "Could not connect(), trying again...", e);
+
+                    //return;
+                }
+           // }
 
             // Release ConnectionThread because we're done
             synchronized (BluetoothLink.this) {
                 mConnectingThread = null;
+                mLastConnectedDevice = mmDevice;
             }
 
             if (DEBUG) Log.d(TAG, "END mConnectingThread");
@@ -364,7 +377,7 @@ public class BluetoothLink {
             InputStream tmpIn = null;
             OutputStream tmpOut = null;
 
-            // Get the BluetoothSocekt input and output streams
+            // Get the BluetoothSocket input and output streams
             try {
                 tmpIn = socket.getInputStream();
                 tmpOut = socket.getOutputStream();
@@ -388,11 +401,21 @@ public class BluetoothLink {
                     bytes = mmInStream.read(buffer);
 
                     // TODO Pass the obtained data to a service user via provided handler
+                    mHandler.obtainMessage(BLMessage.READ.ordinal(), bytes, -1, buffer).sendToTarget();
+                    String readMessage = new String(buffer, 0, bytes);
+                    if (DEBUG) Log.d(TAG, "Received message: " + readMessage);
                 } catch (IOException e) {
                     Log.e(TAG, "connection lost", e);
 
                     // Restart the service
-                    break;
+                    // must be synchronized block since mIsServerSocket is set in main thread
+                    synchronized (BluetoothLink.this) {
+                        if (mIsSocketServer)
+                            accept();
+                        else if (mLastConnectedDevice != null)
+                            connect(mLastConnectedDevice);
+                        break;
+                    }
                 }
             }
         }
@@ -404,6 +427,7 @@ public class BluetoothLink {
         public void write(byte[] buffer) {
             try {
                 mmOutStream.write(buffer);
+                //mHandler.obtainMessage(BLMessage.READ.ordinal(), bytes, -1, buffer).sendToTarget();
 
                 // TODO Inform the service user about successful write
             } catch (IOException e) {
