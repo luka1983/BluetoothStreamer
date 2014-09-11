@@ -6,8 +6,6 @@ import android.bluetooth.BluetoothDevice;
 import android.os.Bundle;
 import android.os.Message;
 import android.util.Log;
-import android.view.Menu;
-import android.view.MenuItem;
 
 import android.os.Handler;
 import android.view.View;
@@ -20,10 +18,6 @@ import android.widget.ListView;
 import android.widget.Switch;
 import android.widget.TextView;
 
-import java.text.SimpleDateFormat;
-import java.util.Calendar;
-import java.util.Date;
-import java.util.List;
 import java.util.Set;
 
 
@@ -57,9 +51,9 @@ public class MainActivity extends Activity {
                         case CONNECTED:
                             if (DEBUG) Log.d(TAG, "Link reports state change to CONNECTED");
                             textLinkStatus.setText("Link status: connected");
-                           // mLink.write(String.format("%d", System.currentTimeMillis()).getBytes());
+                            mLink.write(String.format("%d", System.currentTimeMillis()).getBytes());
 
-                            sendSomeKB(2000, mLink);
+                            //sendSomeKB(2000, mLink, true);
                             //sendSomeMB(2, mLink);
                             break;
                         case NONE:
@@ -72,10 +66,14 @@ public class MainActivity extends Activity {
                     byte[] readBuf = (byte[]) msg.obj;
                     // construct a string from the valid bytes in the buffer
                     String readMessage = new String(readBuf, 0, msg.arg1);
-                    //mLink.write(String.format("%d", System.currentTimeMillis()).getBytes());
+                    mLink.write(String.format("%d", System.currentTimeMillis()).getBytes());
                     //if (DEBUG) Log.d(TAG, "Received message: " + readMessage);
                     TextView trafficText = (TextView) findViewById(R.id.textTraffic);
                     trafficText.setText("Traffic: " + readMessage);
+
+                    if (readMessage.equals(String.format("<ok %d>", 2000 * 1024)))
+                        sendSomeKB(2000, mLink, false);
+
                     break;
                 case WRITE:
                     if (DEBUG) Log.d(TAG, "Data sent");
@@ -99,7 +97,6 @@ public class MainActivity extends Activity {
                     if (DEBUG) Log.d(TAG, "Selected server mode");
                     isServer = true;
                     // Set link to socket server mode and accept connection
-                    mLink.stop();
                     mLink.accept();
                 } else {
                     if (DEBUG) Log.d(TAG, "Selected client mode");
@@ -163,21 +160,23 @@ public class MainActivity extends Activity {
     };
 
     //****************************************************************
-    private void sendSomeKB(int howMuch, BluetoothLink link) {
+    private void sendSomeKB(int howMuch, BluetoothLink link, boolean preamble) {
         byte[] oneKB = new byte[1024];
 
-        if (DEBUG) Log.d(TAG, String.format("Sending %d kB's", howMuch));
+        if (preamble) {
+            if (DEBUG) Log.d(TAG, String.format("Sending preamble: %s", String.format("<start_file %d>", 1024 * howMuch)));
+            link.write(String.format("<start_file %d>", 1024 * howMuch).getBytes());
+        } else {
 
-        link.write("<start_file>".getBytes());
-        for (int i = 0; i < howMuch; i++) {
-            if (DEBUG) Log.d(TAG, String.format("Writing %d kB", i + 1));
-            TextView trafficText = (TextView) findViewById(R.id.textTraffic);
-            trafficText.setText("Traffic: " + String.format("Writing %d kB", i + 1));
-            link.write(oneKB);
+            for (int i = 0; i < howMuch; i++) {
+                if (DEBUG) Log.d(TAG, String.format("Writing %d kB", i + 1));
+                //TextView trafficText = (TextView) findViewById(R.id.textTraffic);
+                //trafficText.setText("Traffic: " + String.format("Writing %d kB", i + 1));
+                link.write(oneKB);
+            }
+
+            if (DEBUG) Log.d(TAG, "Data sent");
         }
-        link.write("<end_file>".getBytes());
-
-        if (DEBUG) Log.d(TAG, "Data sent");
     }
     //****************************************************************
 

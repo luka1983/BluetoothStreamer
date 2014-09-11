@@ -4,6 +4,9 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Message;
 import android.util.Log;
 
@@ -47,6 +50,7 @@ public class BluetoothLink {
     private BLState mState;
     private boolean mIsSocketServer = false;
     private BluetoothDevice mLastConnectedDevice = null;
+    private Context mContext;
 
     // Link states
     public static enum BLState { NONE, LISTENING, CONNECTING, CONNECTED };
@@ -166,8 +170,6 @@ public class BluetoothLink {
         mCommunicationThread = new CommunicationThread(socket);
         mCommunicationThread.start();
 
-        // TODO Inform device about connected device
-
         setState(BLState.CONNECTED);
     }
 
@@ -192,7 +194,6 @@ public class BluetoothLink {
             mCommunicationThread = null;
         }
 
-        //mIsSocketServer = !mIsSocketServer;
         setState(BLState.NONE);
     }
 
@@ -233,6 +234,8 @@ public class BluetoothLink {
 
             // Create a new listening server socket
             try {
+                // this call registers the service NAME/UUID
+                // pair with SDP server with RFCOMM protocol
                 tmp = mAdapter.listenUsingRfcommWithServiceRecord(BL_SDP_SERVICE_NAME, BL_UUID);
             } catch (IOException e) {
                 Log.e(TAG, "listen() failed");
@@ -241,6 +244,7 @@ public class BluetoothLink {
         }
 
         // run() method
+
         public void run() {
             if (DEBUG) Log.d(TAG, "BEGIN mAcceptThread");
             setName("AcceptThread");
@@ -320,9 +324,9 @@ public class BluetoothLink {
 
             // Make a connection to the BluetoothSocket
             //while(true) {
-                try {
-                    // blocking call - returns only on a successful connection or an exception
-                    mmSocket.connect();
+            try {
+                // blocking call - returns only on a successful connection or an exception
+                mmSocket.connect();
                     //break;
                 } catch (IOException e) {
                     // Close the socket
@@ -333,11 +337,11 @@ public class BluetoothLink {
                         return;
                     }
 
-                    Log.e(TAG, "Could not connect(), trying again...", e);
+                Log.e(TAG, "Could not connect(), trying again...", e);
 
-                    //return;
-                }
-           // }
+                return;
+            }
+            // }
 
             // Release ConnectionThread because we're done
             synchronized (BluetoothLink.this) {
@@ -397,13 +401,12 @@ public class BluetoothLink {
             // Prioritize input stream reading
             while (true) {
                 try {
-                    // Read from the InputStream
+                    // Read from the InputStream - blocking call
                     bytes = mmInStream.read(buffer);
 
-                    // TODO Pass the obtained data to a service user via provided handler
+                    // Pass the obtained data to a service user via provided handler
                     mHandler.obtainMessage(BLMessage.READ.ordinal(), bytes, -1, buffer).sendToTarget();
-                    String readMessage = new String(buffer, 0, bytes);
-                    if (DEBUG) Log.d(TAG, "Received message: " + readMessage);
+
                 } catch (IOException e) {
                     Log.e(TAG, "connection lost", e);
 
@@ -413,11 +416,13 @@ public class BluetoothLink {
                         if (mIsSocketServer)
                             accept();
                         else if (mLastConnectedDevice != null)
-                            connect(mLastConnectedDevice);
+                            //connect(mLastConnectedDevice);
                         break;
                     }
                 }
             }
+            if (DEBUG) Log.d(TAG, "END" +
+                    " mCommunicationThread");
         }
 
         /**
