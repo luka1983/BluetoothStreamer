@@ -24,7 +24,7 @@ import java.util.Set;
 public class MainActivity extends Activity {
 
     private BluetoothLink mLink = null;
-    private BluetoothLink.BLMessage message;
+    //private BluetoothLink.BLMessage message;
     private boolean isServer = false;
     private ArrayAdapter<String> mPairedDevicesArrayAdapter;
     private BluetoothAdapter mBtAdapter;

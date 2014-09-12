@@ -4,9 +4,6 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothServerSocket;
 import android.bluetooth.BluetoothSocket;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.os.Message;
 import android.util.Log;
 
@@ -28,6 +25,12 @@ import android.os.Handler;
  *      2. LISTENING
  *      3. CONNECTING
  *      4. CONNECTED
+ *
+ * Bluetooth link can be set in one of the following modes of operation. The link mode defines the
+ * link behaviour on connection loss
+ *      1. UNDEFINED        - mode not defined
+ *      2. SOCKET_SERVER    - upon connection loss the link is put in LISTENING state
+ *      3. CLIENT           - upon connection loss the link is put in CONNECTING state
  */
 public class BluetoothLink {
 
@@ -45,18 +48,20 @@ public class BluetoothLink {
     private final BluetoothAdapter mAdapter;
     private final Handler mHandler;
     private AcceptThread mAcceptThread;
-    private ConnectingThread mConnectingThread;
+    private ConnectingThread mConnectingThread = null;
     private CommunicationThread mCommunicationThread;
     private BLState mState;
-    private boolean mIsSocketServer = false;
     private BluetoothDevice mLastConnectedDevice = null;
-    private Context mContext;
+    private BLMode mMode;
+
+    // Link modes
+    public static enum BLMode { UNDEFINED, SOCKET_SERVER, CLIENT }
 
     // Link states
-    public static enum BLState { NONE, LISTENING, CONNECTING, CONNECTED };
+    public static enum BLState { NONE, LISTENING, CONNECTING, CONNECTED }
 
     // Link messages
-    public static enum BLMessage { STATE_CHANGED, READ, WRITE };
+    public static enum BLMessage { STATE_CHANGED, MODE_CHANGED, READ, WRITE }
 
     /**
      * Constructor. Prepares new BluetoothLink
@@ -65,7 +70,20 @@ public class BluetoothLink {
     public BluetoothLink(Handler handler) {
         mAdapter = BluetoothAdapter.getDefaultAdapter();
         mState = BLState.NONE;
+        mMode = BLMode.UNDEFINED;
         mHandler = handler;
+    }
+
+    /**
+     * Set the new link mode
+     * @param mode     Link new mode of operation
+     */
+    private synchronized void setMode(BLMode mode) {
+        if (DEBUG) Log.d(TAG, "setMode() " + mMode + " -> " + mode);
+        mMode = mode;
+
+        // Inform service user about BluetoothLink state change
+        mHandler.obtainMessage(BLMessage.MODE_CHANGED.ordinal(), mode.ordinal(), -1).sendToTarget();
     }
 
     /**
@@ -93,6 +111,9 @@ public class BluetoothLink {
     public synchronized void accept() {
         if (DEBUG) Log.d(TAG, "Starting link...");
 
+        if (mMode != BLMode.SOCKET_SERVER)
+            setMode(BLMode.SOCKET_SERVER);
+
         // Cancel any thread attempting to make a connection
         if (mConnectingThread != null) {
             mConnectingThread.cancel();
@@ -105,14 +126,14 @@ public class BluetoothLink {
             mCommunicationThread = null;
         }
 
-        mLastConnectedDevice = null;
-        mIsSocketServer = true;
-        setState(BLState.LISTENING);
-
         // Start the socket server thread
         if (mAcceptThread == null) {
+            mLastConnectedDevice = null;
+            setState(BLState.LISTENING);
             mAcceptThread = new AcceptThread();
             mAcceptThread.start();
+        } else {
+            if (DEBUG) Log.d(TAG, "AcceptThread already running...");
         }
     }
 
@@ -121,9 +142,14 @@ public class BluetoothLink {
      * @param   device  The BluetoothDevice to connect
      */
     public synchronized void connect(BluetoothDevice device) {
+
+        if (mMode != BLMode.CLIENT)
+            setMode(BLMode.CLIENT);
+
         if (device == null) {
-            // obtain device from the list of previously connected devices
+            return;
         }
+
         if (DEBUG) Log.d(TAG, "connect to: " + device);
 
         // Cancel any thread attempting to make a connection
@@ -133,14 +159,18 @@ public class BluetoothLink {
                 mConnectingThread = null;
             }
         }
-
         // Cancel any thread currently running a connection
         if (mCommunicationThread != null) {
             mCommunicationThread.cancel();
             mCommunicationThread = null;
         }
 
-        mIsSocketServer = false;
+        // Cancel any thread accepting connection
+        if (mAcceptThread != null) {
+            mAcceptThread.cancel();
+            mAcceptThread = null;
+        }
+
         mConnectingThread = new ConnectingThread(device);
         mConnectingThread.start();
         setState(BLState.CONNECTING);
@@ -152,7 +182,7 @@ public class BluetoothLink {
      * @param   device  BluetoothDevice that has been connected
      */
     private synchronized void communicate(BluetoothSocket socket, BluetoothDevice device) {
-        if (DEBUG) Log.d(TAG, "Starting communication with connected device");
+        if (DEBUG) Log.d(TAG, "Starting communication with connected device: " + device.getName());
 
         // Cancel the thread that completed the connection
         if (mConnectingThread != null) {
@@ -178,6 +208,10 @@ public class BluetoothLink {
      */
     public synchronized void stop() {
         if (DEBUG) Log.d(TAG, "STOP");
+
+        // Link stopping sets the mode of the link to undefined
+        if (mMode != BLMode.UNDEFINED)
+            setMode(BLMode.UNDEFINED);
 
         if (mAcceptThread != null) {
             mAcceptThread.cancel();
@@ -244,37 +278,37 @@ public class BluetoothLink {
         }
 
         // run() method
-
         public void run() {
             if (DEBUG) Log.d(TAG, "BEGIN mAcceptThread");
             setName("AcceptThread");
 
-            BluetoothSocket socket = null;
+            BluetoothSocket mmSocket = null;
 
             // while not connected, listen to a server socket
             while (mState != BLState.CONNECTED) {
                 try {
                     // blocking call
-                    socket = mmServerSocket.accept();
+                    mmSocket = mmServerSocket.accept();
                 } catch (IOException e) {
                     Log.e(TAG, "accept() failed");
                     break;
                 }
 
                 // connection accepted...
-                if (socket != null) {
+                if (mmSocket != null) {
                     synchronized (this) {
                         switch (mState) {
                             case LISTENING:
                             case CONNECTING:
                                 // switch state to connected
-                                communicate(socket, socket.getRemoteDevice());
+                                communicate(mmSocket, mmSocket.getRemoteDevice());
                                 break;
                             case NONE:
                             case CONNECTED:
-                                // we do not support multiple connections
+                                // we do not support multiple connections so if connection is
+                                // already running, terminate new one
                                 try {
-                                    socket.close();
+                                    mmSocket.close();
                                 } catch (IOException e) {
                                     Log.e(TAG, "Could not close unwanted socket");
                                 }
@@ -323,25 +357,24 @@ public class BluetoothLink {
             mAdapter.cancelDiscovery();
 
             // Make a connection to the BluetoothSocket
-            //while(true) {
-            try {
-                // blocking call - returns only on a successful connection or an exception
-                mmSocket.connect();
-                    //break;
-                } catch (IOException e) {
-                    // Close the socket
-                    try {
-                        mmSocket.close();
-                    } catch (IOException e2) {
-                        Log.e(TAG, "Could not close() socket after connect() failure");
-                        return;
+            while (true) {
+                try {
+                    // blocking call - returns only on a successful connection or an exception
+                    if (!mmSocket.isConnected()) {
+                        mmSocket.connect();
+                        break;
                     }
+                } catch (IOException e) {
 
-                Log.e(TAG, "Could not connect(), trying again...", e);
-
-                return;
+                    Log.e(TAG, "Could not connect(), trying again in 2 s...", e);
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e2) {
+                        Log.e(TAG, "mConnectiongThread could not sleep", e);
+                    }
+                    Log.e(TAG, "Trying again...", e);
+                }
             }
-            // }
 
             // Release ConnectionThread because we're done
             synchronized (BluetoothLink.this) {
@@ -386,7 +419,7 @@ public class BluetoothLink {
                 tmpIn = socket.getInputStream();
                 tmpOut = socket.getOutputStream();
             } catch (IOException e) {
-              Log.e(TAG, "Could not retrieve input and output streams from socket", e);
+                Log.e(TAG, "Could not retrieve input and output streams from socket", e);
             }
 
             mmInStream = tmpIn;
@@ -413,16 +446,15 @@ public class BluetoothLink {
                     // Restart the service
                     // must be synchronized block since mIsServerSocket is set in main thread
                     synchronized (BluetoothLink.this) {
-                        if (mIsSocketServer)
+                        if (mMode == BLMode.SOCKET_SERVER)
                             accept();
-                        else if (mLastConnectedDevice != null)
-                            //connect(mLastConnectedDevice);
+                        else if (mLastConnectedDevice != null && mMode == BLMode.CLIENT)
+                            connect(mLastConnectedDevice);
                         break;
                     }
                 }
             }
-            if (DEBUG) Log.d(TAG, "END" +
-                    " mCommunicationThread");
+            if (DEBUG) Log.d(TAG, "END mCommunicationThread");
         }
 
         /**
@@ -432,9 +464,6 @@ public class BluetoothLink {
         public void write(byte[] buffer) {
             try {
                 mmOutStream.write(buffer);
-                //mHandler.obtainMessage(BLMessage.READ.ordinal(), bytes, -1, buffer).sendToTarget();
-
-                // TODO Inform the service user about successful write
             } catch (IOException e) {
                 Log.e(TAG, "Exception during write", e);
             }
